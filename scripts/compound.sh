@@ -51,8 +51,10 @@ should_reflect() {
     fi
 
     # Rule 6: Modified important file → reflect
-    local important_files="MEMORY.md|SKILL.md|config.yaml|AGENTS.md|CLAUDE.md"
-    if echo "$files_modified" | grep -qE "$important_files"; then
+    # Exclude skills/*/SKILL.md (skill content is expected to change)
+    local important_files="MEMORY.md|config.yaml|AGENTS.md|CLAUDE.md"
+    local filtered_files=$(echo "$files_modified" | sed 's|skills/[^/]*/SKILL\.md||g')
+    if echo "$filtered_files" | grep -qE "$important_files"; then
         echo "reflect"
         return
     fi
@@ -77,6 +79,35 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             retries="${5:-0}"
             files="${6:-}"
             result=$(should_reflect "$outcome" "$severity" "$duration" "$retries" "$files")
+            # 如果需要反思，同时记录到统一模块
+            if [[ "$result" == "reflect" ]]; then
+                # 调用 unified_reflection.py 记录事件
+                python3 ~/.hermes/hermes-agent/tools/unified_reflection.py record \
+                    "task_end" \
+                    "Task completed with outcome=$outcome" \
+                    "$outcome" \
+                    "$severity" \
+                    "" 2>/dev/null || true
+
+                # Auto-detect skill-related tasks and evolve them
+                # Extract skill names from files argument (patterns: skills/<name>/ or SKILL.md)
+                if [[ -n "$files" ]]; then
+                    # Extract skill names from paths like skills/<name>/...
+                    skills_from_path=$(echo "$files" | grep -oP 'skills/\K[^/]+' 2>/dev/null | sort -u || true)
+                    # Also match paths ending in SKILL.md (infer skill dir name)
+                    skills_from_md=$(echo "$files" | grep -oP '([^/]+)/SKILL\.md' 2>/dev/null | sed 's|/SKILL\.md||' | sort -u || true)
+                    # Combine and deduplicate
+                    all_skills=$(printf '%s\n%s\n' "$skills_from_path" "$skills_from_md" | sort -u | grep -v '^$' || true)
+                    for skill_name in $all_skills; do
+                        # Skip non-skill directories
+                        case "$skill_name" in
+                            .skill-index|.compound|learned|node_modules|__pycache__|scripts) continue ;;
+                        esac
+                        python3 ~/.hermes/hermes-agent/tools/unified_reflection.py evolve \
+                            "$skill_name" "$outcome" >/dev/null 2>&1 || true
+                    done
+                fi
+            fi
             echo "$result"
             ;;
         capture)
