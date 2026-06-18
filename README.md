@@ -18,7 +18,7 @@
 
 ```bash
 # 1. Clone or copy to your system
-git clone https://github.com/yourusername/compound-system.git
+git clone https://github.com/lennney/compound-system.git
 cd compound-system
 
 # 2. Make scripts executable

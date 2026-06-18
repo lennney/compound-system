@@ -132,9 +132,9 @@ echo "=== Duplicate Check ==="
 declare -A TITLE_MAP
 while IFS= read -r filepath; do
     [[ ! -f "$filepath" ]] && continue
-    title=$(grep -m1 "^title:" "$filepath" 2>/dev/null | sed 's/^title: *//' | tr -d '"')
+    title=$(grep -m1 "^title:" "$filepath" 2>/dev/null | sed 's/^title: *//' | tr -d '"' || true)
     [[ -z "$title" ]] && continue
-    if [[ -n "${TITLE_MAP[$title]:-}" ]]; then
+    if [[ -n "${TITLE_MAP[$title]+x}" ]]; then
         echo "  DUPLICATE: '$title'"
         echo "    - ${TITLE_MAP[$title]}"
         echo "    - $filepath"
