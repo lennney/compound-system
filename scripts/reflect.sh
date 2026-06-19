@@ -3,7 +3,13 @@
 # Usage: reflect.sh <task_description> <outcome> <severity> <error_messages>
 #
 # Requires: LLM_API_KEY env var (supports OpenAI-compatible APIs)
-# Optional: LLM_ENDPOINT (default: api.deepseek.com), LLM_MODEL (default: deepseek-v4-flash)
+# Optional: LLM_ENDPOINT (default: api.deepseek.com), LLM_MODEL (default: deepseek-chat)
+#
+# Configuration priority:
+#   1. Environment variables (LLM_API_KEY, LLM_ENDPOINT, LLM_MODEL)
+#   2. .env file in COMPOUND_ROOT
+#   3. Platform-specific config (~/.hermes/config.yaml, ~/.config/compound/config.yaml)
+#   4. Default values
 
 COMPOUND_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 source "$COMPOUND_ROOT/scripts/utils.sh"
@@ -13,60 +19,102 @@ OUTCOME="${2:-success}"
 SEVERITY="${3:-none}"
 ERROR_MSG="${4:-}"
 
-# LLM config
-LLM_ENDPOINT="${LLM_ENDPOINT:-https://api.deepseek.com/v1}"
-LLM_MODEL="${LLM_MODEL:-deepseek-v4-flash}"
+# Default LLM config (can be overridden by env or .env)
+DEFAULT_LLM_ENDPOINT="https://api.deepseek.com/v1"
+DEFAULT_LLM_MODEL="deepseek-chat"
 
-# Load API key: env → .env → ~/.hermes/config.yaml (try multiple providers)
-if [[ -z "${LLM_API_KEY:-}" ]]; then
+# Load configuration: env → .env → platform config
+load_config() {
+    # 1. Check environment variables first
+    if [[ -n "${LLM_API_KEY:-}" ]]; then
+        return
+    fi
+
+    # 2. Load from .env file
     if [[ -f "$COMPOUND_ROOT/.env" ]]; then
         source "$COMPOUND_ROOT/.env"
     fi
-fi
 
-if [[ -z "${LLM_API_KEY:-}" ]]; then
-    # Parse from Hermes config.yaml — try providers in priority order
-    HERMES_CONFIG="${HERMES_CONFIG:-$HOME/.hermes/config.yaml}"
-    if [[ -f "$HERMES_CONFIG" ]] && command -v python3 &>/dev/null; then
-        # Try xiaomi-sk (non-token-plan, works reliably) → xiaomi → opencode-go → deepseek
-        for provider in xiaomi-sk xiaomi opencode-go deepseek; do
-            LLM_API_KEY=$(python3 -c "
-import yaml
+    # 3. Try platform-specific configs
+    if [[ -z "${LLM_API_KEY:-}" ]]; then
+        # Detect Python command
+        local python_cmd="python3"
+        if ! command -v python3 &>/dev/null; then
+            python_cmd="python"
+        fi
+
+        # Try multiple config locations
+        local config_files=(
+            "$HOME/.hermes/config.yaml"
+            "$HOME/.config/compound/config.yaml"
+            "$HOME/.config/compound-system/config.yaml"
+        )
+
+        for config_file in "${config_files[@]}"; do
+            if [[ -f "$config_file" ]] && command -v $python_cmd &>/dev/null; then
+                # Try providers in priority order
+                for provider in deepseek openai xiaomi xiaomi-sk anthropic; do
+                    LLM_API_KEY=$($python_cmd -c "
+import yaml, json
 try:
-    with open('$HERMES_CONFIG') as f:
+    with open('$config_file') as f:
         cfg = yaml.safe_load(f)
-    key = cfg.get('providers',{}).get('$provider',{}).get('api_key','')
+    providers = cfg.get('providers', {})
+    p = providers.get('$provider', {})
+    key = p.get('api_key', '')
     if key: print(key)
 except: pass
 " 2>/dev/null)
-            if [[ -n "$LLM_API_KEY" ]]; then
-                case "$provider" in
-                    xiaomi-sk)
-                        LLM_ENDPOINT="https://api.xiaomimimo.com/v1"
-                        LLM_MODEL="mimo-v2.5"
-                        ;;
-                    xiaomi)
-                        LLM_ENDPOINT="https://token-plan-cn.xiaomimimo.com/v1"
-                        LLM_MODEL="mimo-v2.5"
-                        ;;
-                    opencode-go)
-                        LLM_ENDPOINT="https://opencode.ai/zen/go/v1"
-                        LLM_MODEL="deepseek-v4-pro"
-                        ;;
-                    deepseek)
-                        LLM_ENDPOINT="https://api.deepseek.com/v1"
-                        LLM_MODEL="deepseek-v4-flash"
-                        ;;
-                esac
-                log_info "Using LLM provider: $provider" >&2
-                break
+                    if [[ -n "$LLM_API_KEY" ]]; then
+                        # Set endpoint and model based on provider
+                        case "$provider" in
+                            deepseek)
+                                LLM_ENDPOINT="${LLM_ENDPOINT:-https://api.deepseek.com/v1}"
+                                LLM_MODEL="${LLM_MODEL:-deepseek-chat}"
+                                ;;
+                            openai)
+                                LLM_ENDPOINT="${LLM_ENDPOINT:-https://api.openai.com/v1}"
+                                LLM_MODEL="${LLM_MODEL:-gpt-4o-mini}"
+                                ;;
+                            xiaomi)
+                                LLM_ENDPOINT="${LLM_ENDPOINT:-https://token-plan-cn.xiaomimimo.com/v1}"
+                                LLM_MODEL="${LLM_MODEL:-mimo-v2.5}"
+                                ;;
+                            xiaomi-sk)
+                                LLM_ENDPOINT="${LLM_ENDPOINT:-https://api.xiaomimimo.com/v1}"
+                                LLM_MODEL="${LLM_MODEL:-mimo-v2.5}"
+                                ;;
+                            anthropic)
+                                LLM_ENDPOINT="${LLM_ENDPOINT:-https://api.anthropic.com/v1}"
+                                LLM_MODEL="${LLM_MODEL:-claude-3-haiku-20240307}"
+                                ;;
+                        esac
+                        log_info "Using LLM provider: $provider (from $config_file)" >&2
+                        break
+                    fi
+                done
             fi
         done
     fi
-fi
+}
 
+# Load configuration
+load_config
+
+# Set defaults if not configured
+LLM_ENDPOINT="${LLM_ENDPOINT:-$DEFAULT_LLM_ENDPOINT}"
+LLM_MODEL="${LLM_MODEL:-$DEFAULT_LLM_MODEL}"
+
+# Validate API key
 if [[ -z "${LLM_API_KEY:-}" ]]; then
-    log_error "No LLM API key found (export LLM_API_KEY, add to .env, or configure in ~/.hermes/config.yaml)"
+    log_error "No LLM API key found!"
+    echo ""
+    echo "Configuration options:"
+    echo "  1. Run setup wizard: bash scripts/setup.sh"
+    echo "  2. Export environment variable: export LLM_API_KEY=your-key"
+    echo "  3. Create .env file in $COMPOUND_ROOT"
+    echo ""
+    echo "Supported providers: deepseek, openai, xiaomi, xiaomi-sk, anthropic, custom"
     exit 1
 fi
 
@@ -99,8 +147,16 @@ export COMPOUND_PROMPT="$PROMPT"
 export LLM_ENDPOINT LLM_MODEL LLM_API_KEY
 
 # Call LLM (via Python to avoid bash quoting issues)
-RESPONSE=$(python3 << 'PYEOF'
-import yaml, json, urllib.request, sys, os
+# Detect Python command (Windows uses 'python', Unix uses 'python3')
+PYTHON_CMD="python3"
+if ! command -v python3 &>/dev/null; then
+    PYTHON_CMD="python"
+fi
+
+# Write Python script to temp file
+TEMP_SCRIPT=$(mktemp /tmp/reflect_XXXXXX.py)
+cat > "$TEMP_SCRIPT" << 'PYEOF'
+import yaml, json, urllib.request, sys, os, base64
 
 config_path = os.path.expanduser('~/.hermes/config.yaml')
 endpoint = os.environ.get('LLM_ENDPOINT', '')
@@ -129,7 +185,7 @@ data = json.dumps({
     'messages': [{'role': 'user', 'content': prompt}],
     'max_tokens': 2000,
     'temperature': 0.3
-}).encode()
+}).encode('utf-8')
 
 try:
     req = urllib.request.Request(
@@ -141,17 +197,57 @@ try:
         }
     )
     resp = urllib.request.urlopen(req, timeout=30)
-    print(resp.read().decode())
+    response_bytes = resp.read()
+    # Encode to base64 to avoid shell encoding issues
+    print(base64.b64encode(response_bytes).decode('ascii'))
 except Exception as e:
-    print(json.dumps({'error': {'message': str(e)}}))
+    error_json = json.dumps({'error': {'message': str(e)}})
+    print(base64.b64encode(error_json.encode('utf-8')).decode('ascii'))
+PYEOF
+
+RESPONSE_B64=$($PYTHON_CMD "$TEMP_SCRIPT")
+rm -f "$TEMP_SCRIPT"
+
+# Decode base64 response
+RESPONSE=$(echo "$RESPONSE_B64" | base64 -d 2>/dev/null || echo "$RESPONSE_B64")
+
+# Extract content using Python (jq not available on Windows)
+# Write response to temp file to avoid shell escaping issues
+# Use TEMP on Windows, TMPDIR or /tmp on Unix
+if [[ -n "${TEMP:-}" ]]; then
+    TEMP_RESPONSE=$(mktemp "$TEMP/response_XXXXXX.json")
+elif [[ -n "${TMPDIR:-}" ]]; then
+    TEMP_RESPONSE=$(mktemp "$TMPDIR/response_XXXXXX.json")
+else
+    TEMP_RESPONSE=$(mktemp /tmp/response_XXXXXX.json)
+fi
+echo "$RESPONSE" > "$TEMP_RESPONSE"
+
+# Use Python to parse JSON from file (avoids shell escaping issues)
+# Set PYTHONIOENCODING to ensure proper UTF-8 output
+export PYTHONIOENCODING=utf-8
+CONTENT=$($PYTHON_CMD << PYEOF
+import json, sys, os
+temp_file = r'$TEMP_RESPONSE'
+try:
+    with open(temp_file, 'r', encoding='utf-8', errors='replace') as f:
+        data = json.load(f)
+    content = data.get('choices', [{}])[0].get('message', {}).get('content', '')
+    error = data.get('error', {}).get('message', '')
+    if content:
+        # Ensure proper encoding
+        sys.stdout.reconfigure(encoding='utf-8')
+        print(content)
+    elif error:
+        print('ERROR: ' + error, file=sys.stderr)
+except Exception as e:
+    print('ERROR: ' + str(e), file=sys.stderr)
 PYEOF
 )
-
-# Extract content
-CONTENT=$(echo "$RESPONSE" | jq -r '.choices[0].message.content // empty')
+rm -f "$TEMP_RESPONSE"
 
 if [[ -z "$CONTENT" ]]; then
-    log_error "LLM call failed: $(echo "$RESPONSE" | jq -r '.error.message // "unknown error"')"
+    log_error "LLM call failed"
     exit 1
 fi
 
